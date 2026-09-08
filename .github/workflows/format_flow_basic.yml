@@ -1,0 +1,58 @@
+name: Format flow_basic notebook
+
+on:
+  push:
+    paths:
+      - '.github/workflows/format_flow_basic.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Format notebook code for readability
+        run: |
+          python -m pip install --quiet 'black[jupyter]'
+          black --line-length 88 flow_basic.ipynb
+
+      - name: Validate notebook structure and code cells
+        run: |
+          python - <<'PY'
+          import ast, json
+
+          with open('flow_basic.ipynb', encoding='utf-8') as f:
+              nb = json.load(f)
+
+          assert nb['cells'][0]['cell_type'] == 'markdown'
+          assert 'Open In Colab' in ''.join(nb['cells'][0]['source'])
+
+          checked = 0
+          for cell in nb['cells']:
+              if cell['cell_type'] != 'code':
+                  continue
+              src = ''.join(cell['source'])
+              cleaned = []
+              for line in src.splitlines():
+                  stripped = line.lstrip()
+                  if stripped.startswith(('!', '%')):
+                      continue
+                  cleaned.append(line)
+              text = '\n'.join(cleaned).strip()
+              if text:
+                  ast.parse(text)
+                  checked += 1
+
+          print(f'validated code cells: {checked}')
+          PY
+
+      - name: Commit formatted notebook
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add flow_basic.ipynb
+          git diff --cached --quiet || git commit -m 'Improve flow_basic code readability'
+          git push
