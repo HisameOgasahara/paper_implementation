@@ -1,10 +1,294 @@
-import base64
-import gzip
+import json
 from pathlib import Path
 
-PAYLOAD = "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"
+PATH = Path('mean_flow_sanity_check.ipynb')
+nb = json.loads(PATH.read_text(encoding='utf-8'))
 
-Path("mean_flow_sanity_check.ipynb").write_bytes(
-    gzip.decompress(base64.b64decode(PAYLOAD))
+def lines(s):
+    return s.splitlines(keepends=True)
+
+def txt(c):
+    return ''.join(c.get('source', []))
+
+meta = nb.setdefault('metadata', {})
+meta['accelerator'] = 'GPU'
+meta.setdefault('colab', {})['gpuType'] = 'T4'
+meta['colab'].setdefault('provenance', [])
+meta['kernelspec'] = {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'}
+meta['language_info'] = {'name': 'python', 'version': '3.x'}
+
+setup = '''# @title 0-1. Install / imports / configuration
+!pip -q install datasets tensorboard
+
+import math
+import os
+import random
+import time
+import warnings
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from datasets import load_dataset
+from torch.func import jvp
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torchvision import datasets as tv_datasets
+from torchvision import transforms
+from torchvision.transforms import ToTensor
+from torchvision.utils import save_image
+
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        "CUDA GPU is not connected. In Colab choose Runtime > Change runtime type > T4 GPU, reconnect, then run from the top."
+    )
+
+DEVICE = torch.device("cuda")
+GPU_NAME = torch.cuda.get_device_name(0)
+print("GPU:", GPU_NAME)
+print("CUDA available:", torch.cuda.is_available())
+
+if "T4" not in GPU_NAME:
+    warnings.warn(
+        f"This notebook is sized for a T4, but current GPU is {GPU_NAME}."
+    )
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.mha.set_fastpath_enabled(False)
+
+TRAIN_STEPS = 20_000
+BATCH_SIZE = 128
+LEARNING_RATE = 1e-3
+ADAM_BETAS = (0.9, 0.99)
+ADAM_EPS = 1e-8
+
+SCALAR_LOG_EVERY = 50
+DIAGNOSTIC_EVERY = 250
+SAMPLE_EVERY = 1_000
+DIAGNOSTIC_BATCH_SIZE = 64
+FIXED_SAMPLE_COUNT = 16
+SAMPLE_UPSCALE = 6
+
+P_MEAN = -0.4
+P_STD = 1.0
+DATA_PROPORTION = 0.75
+NORM_P = 1.0
+NORM_EPS = 1.0
+
+ROOT_DIR = "/content/meanflow_mnist_dit_sanity"
+RUN_NAME = "mnist_dit20k_" + time.strftime("%Y%m%d_%H%M%S")
+RUN_DIR = os.path.join(ROOT_DIR, RUN_NAME)
+SAMPLE_DIR = os.path.join(RUN_DIR, "samples")
+TENSORBOARD_ROOT = os.path.join(ROOT_DIR, "tensorboard")
+LOG_DIR = os.path.join(TENSORBOARD_ROOT, RUN_NAME)
+REFERENCE_PATH = os.path.join(RUN_DIR, "reference_mnist.png")
+CHECKPOINT_PATH = os.path.join(RUN_DIR, "meanflow_dit_mnist_20k.pt")
+
+os.makedirs(SAMPLE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+writer = SummaryWriter(LOG_DIR)
+writer.add_text(
+    "run/config",
+    (
+        f"gpu={GPU_NAME}, steps={TRAIN_STEPS}, batch={BATCH_SIZE}, "
+        f"lr={LEARNING_RATE}, p_mean={P_MEAN}, p_std={P_STD}, "
+        f"data_proportion={DATA_PROPORTION}, norm_eps={NORM_EPS}"
+    ),
+    global_step=0,
 )
-print("wrote mean_flow_sanity_check.ipynb")
+writer.flush()
+
+print("RUN_DIR:", RUN_DIR)
+print("SAMPLE_DIR:", SAMPLE_DIR)
+print("TensorBoard log:", LOG_DIR)
+'''
+
+tb_md = '''## 1. TensorBoard — 학습 전에 실행
+
+메트릭은 PNG 파일을 계속 덮어쓰지 않고 **TensorBoard event log**에 누적한다.
+
+- `train/loss_adaptive`
+- `train/grad_norm`
+- `diagnostic/raw_mse_all`
+- `diagnostic/raw_mse_interval`
+- `diagnostic/interval_cosine`
+- `diagnostic/boundary_mse`
+- `run/elapsed_minutes`
+
+생성 이미지만 `samples/step_XXXXX.png`로 1000 step마다 각각 별도 저장한다.
+'''
+
+tb_code = '''# @title 1-1. Launch TensorBoard before training
+%load_ext tensorboard
+%tensorboard --logdir /content/meanflow_mnist_dit_sanity/tensorboard --reload_interval 5
+'''
+
+# Keep existing fixed diagnostic definitions/sample saver, but drop CSV and summary-PNG writers.
+diag = next(c for c in nb['cells'] if '# @title 4-1. Fixed batch / diagnostics / file writers' in txt(c))
+diag_text = txt(diag)
+diag_text = diag_text.replace('metric_rows = []\n\n\n', '')
+cut = diag_text.find('\ndef write_metrics_csv():')
+if cut != -1:
+    tail = diag_text.find('\nprint(\n    "fixed finite-interval samples:"', cut)
+    diag_text = diag_text[:cut] + diag_text[tail:]
+diag_text = diag_text.replace('# @title 4-1.', '# @title 5-1.', 1)
+diag['source'] = lines(diag_text)
+
+train = next(c for c in nb['cells'] if '# @title 5-1. Train 20,000 steps' in txt(c))
+train_text = txt(train)
+train_text = train_text.replace('# @title 5-1.', '# @title 6-1.', 1)
+old_zero = '''metric_rows.append(
+    {
+        "step": 0,
+        **step_zero_diagnostics,
+        "grad_norm": 0.0,
+        "elapsed_minutes": 0.0,
+    }
+)
+
+write_metrics_csv()
+write_training_summary()
+'''
+new_zero = '''for metric_name, metric_value in step_zero_diagnostics.items():
+    writer.add_scalar(
+        f"diagnostic/{metric_name}",
+        metric_value,
+        0,
+    )
+writer.add_scalar("train/grad_norm", 0.0, 0)
+writer.add_scalar("run/elapsed_minutes", 0.0, 0)
+writer.flush()
+'''
+train_text = train_text.replace(old_zero, new_zero)
+old_diag = '''        metric_rows.append(
+            {
+                "step": step,
+                **diagnostics,
+                "grad_norm": grad_norm,
+                "elapsed_minutes": (
+                    elapsed_minutes
+                ),
+            }
+        )
+
+        write_metrics_csv()
+        write_training_summary()
+'''
+new_diag = '''        for metric_name, metric_value in diagnostics.items():
+            writer.add_scalar(
+                f"diagnostic/{metric_name}",
+                metric_value,
+                step,
+            )
+        writer.add_scalar(
+            "run/elapsed_minutes",
+            elapsed_minutes,
+            step,
+        )
+        writer.flush()
+'''
+train_text = train_text.replace(old_diag, new_diag)
+needle = '    optimizer.step()\n\n    if step % DIAGNOSTIC_EVERY == 0:\n'
+insert = '''    optimizer.step()
+
+    if step == 1 or step % SCALAR_LOG_EVERY == 0:
+        writer.add_scalar(
+            "train/loss_adaptive",
+            loss.item(),
+            step,
+        )
+        writer.add_scalar(
+            "train/grad_norm",
+            grad_norm,
+            step,
+        )
+
+    if step % DIAGNOSTIC_EVERY == 0:
+'''
+train_text = train_text.replace(needle, insert)
+train_text = train_text.replace(
+    'print("training complete")\nprint("checkpoint:", CHECKPOINT_PATH)\n',
+    'writer.flush()\nwriter.close()\n\nprint("training complete")\nprint("checkpoint:", CHECKPOINT_PATH)\n'
+)
+train['source'] = lines(train_text)
+
+# Replace section markdown and result cell.
+for c in nb['cells']:
+    s = txt(c)
+    if s.startswith('## 1. MNIST'):
+        c['source'] = lines(s.replace('## 1. MNIST', '## 2. MNIST', 1))
+    elif '# @title 1-1. Download MNIST' in s:
+        c['source'] = lines(s.replace('# @title 1-1.', '# @title 2-1.', 1))
+    elif s.startswith('## 2. DiT backbone'):
+        c['source'] = lines(s.replace('## 2. DiT backbone', '## 3. DiT backbone', 1))
+    elif '# @title 2-1. ~3.78M MeanFlow DiT' in s:
+        c['source'] = lines(s.replace('# @title 2-1.', '# @title 3-1.', 1))
+    elif s.startswith('## 3. MeanFlow objective'):
+        c['source'] = lines(s.replace('## 3. MeanFlow objective', '## 4. MeanFlow objective', 1))
+    elif '# @title 3-1. MeanFlow sampling' in s:
+        c['source'] = lines(s.replace('# @title 3-1.', '# @title 4-1.', 1))
+    elif s.startswith('## 4. Fixed diagnostics'):
+        c['source'] = lines('''## 5. Fixed diagnostics and separate sample files
+
+고정된 test image/noise/time pair로 250 step마다 진단하고 **TensorBoard에 누적**한다.
+생성 이미지는 1000 step마다 `samples/step_XXXXX.png`로 각각 독립 저장한다.
+''')
+    elif s.startswith('## 5. Train 20k'):
+        c['source'] = lines('''## 6. Train 20k
+
+- adaptive loss / grad norm은 TensorBoard에 50 step마다 기록
+- fixed diagnostics는 TensorBoard에 250 step마다 기록
+- 생성은 1000 step마다 **별도 PNG** 저장
+- 마지막 checkpoint 저장
+''')
+    elif s.startswith('## 6. Result paths'):
+        c['source'] = lines('''## 7. Result paths
+
+생성 결과는 **시점별 독립 PNG**이고, 메트릭은 TensorBoard event log에 있다.
+''')
+    elif '# @title 6-1. Print saved files and final metrics' in s:
+        c['source'] = lines('''# @title 7-1. Print result paths
+sample_files = sorted(
+    file_name
+    for file_name in os.listdir(SAMPLE_DIR)
+    if file_name.endswith(".png")
+)
+
+print("sample files:")
+for file_name in sample_files:
+    print(" -", os.path.join(SAMPLE_DIR, file_name))
+
+print("TensorBoard root:", TENSORBOARD_ROOT)
+print("reference:", REFERENCE_PATH)
+print("checkpoint:", CHECKPOINT_PATH)
+''')
+    elif '# @title 0-1. Install / imports / configuration' in s:
+        c['source'] = lines(setup)
+
+# Insert TensorBoard cells after setup, removing any old copy first.
+nb['cells'] = [c for c in nb['cells'] if 'Launch TensorBoard before training' not in txt(c) and not txt(c).startswith('## 1. TensorBoard')]
+setup_idx = next(i for i,c in enumerate(nb['cells']) if '# @title 0-1.' in txt(c))
+nb['cells'][setup_idx+1:setup_idx+1] = [
+    {'cell_type':'markdown','metadata':{},'source':lines(tb_md)},
+    {'cell_type':'code','execution_count':None,'metadata':{},'outputs':[],'source':lines(tb_code)},
+]
+
+for c in nb['cells']:
+    s = txt(c)
+    if s.startswith('[![Open In Colab]'):
+        s = s.replace('수치 결과는 `metrics.csv`와 `training_summary.png`에 저장한다.', '수치 메트릭은 TensorBoard event log에 누적하고, 생성 이미지는 step별 PNG로 각각 저장한다.')
+        c['source'] = lines(s)
+        break
+
+serialized = json.dumps(nb, ensure_ascii=False, indent=1) + '\n'
+json.loads(serialized)
+PATH.write_text(serialized, encoding='utf-8')
+print('updated', PATH)
