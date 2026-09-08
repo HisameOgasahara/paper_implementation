@@ -1,0 +1,37 @@
+name: Add Colab badge
+
+on:
+  push:
+    paths:
+      - '.github/workflows/add_colab_badge.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Insert badge and validate notebook
+        run: |
+          python - <<'PY'
+          import json
+          p='flow_basic.ipynb'
+          with open(p,encoding='utf-8') as f: nb=json.load(f)
+          badge='[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/paper_implementation/blob/main/flow_basic.ipynb)\n'
+          src=nb['cells'][0]['source']
+          if not any('Open In Colab' in s for s in src):
+              src.insert(0, badge)
+              src.insert(1, '\n')
+          with open(p,'w',encoding='utf-8') as f: json.dump(nb,f,ensure_ascii=False,indent=1)
+          assert nb['cells'][0]['source'][0].startswith('[![Open In Colab]')
+          print('badge inserted; cells =',len(nb['cells']))
+          PY
+      - name: Commit
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add flow_basic.ipynb
+          git diff --cached --quiet || git commit -m 'Add Open in Colab badge'
+          git push
