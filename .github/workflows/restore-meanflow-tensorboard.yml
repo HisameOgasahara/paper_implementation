@@ -1,0 +1,637 @@
+name: Restore MeanFlow TensorBoard
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-notebook:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Restore TensorBoard and GPU metadata
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('mean_flow_sanity_check.ipynb')
+          notebook = json.loads(path.read_text(encoding='utf-8'))
+
+          def lines(text):
+              return text.splitlines(keepends=True)
+
+          def source_text(cell):
+              return ''.join(cell.get('source', []))
+
+          # Colab needs accelerator=GPU in addition to gpuType metadata.
+          metadata = notebook.setdefault('metadata', {})
+          metadata['accelerator'] = 'GPU'
+          colab = metadata.setdefault('colab', {})
+          colab['gpuType'] = 'T4'
+          colab.setdefault('provenance', [])
+          metadata['kernelspec'] = {
+              'display_name': 'Python 3',
+              'language': 'python',
+              'name': 'python3',
+          }
+          metadata['language_info'] = {
+              'name': 'python',
+              'version': '3.x',
+          }
+
+          setup_source = '''# @title 0-1. Install / imports / configuration
+!pip -q install datasets tensorboard
+
+import math
+import os
+import random
+import time
+import warnings
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from datasets import load_dataset
+from torch.func import jvp
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torchvision import datasets as tv_datasets
+from torchvision import transforms
+from torchvision.transforms import ToTensor
+from torchvision.utils import save_image
+
+SEED = 42
+
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        "CUDA GPU is not connected. In Colab choose Runtime > Change runtime type > T4 GPU, reconnect, then run from the top."
+    )
+
+DEVICE = torch.device("cuda")
+GPU_NAME = torch.cuda.get_device_name(0)
+print("GPU:", GPU_NAME)
+print("CUDA available:", torch.cuda.is_available())
+
+if "T4" not in GPU_NAME:
+    warnings.warn(
+        f"This notebook is sized for a T4, but current GPU is {GPU_NAME}."
+    )
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.mha.set_fastpath_enabled(False)
+
+TRAIN_STEPS = 20_000
+BATCH_SIZE = 128
+LEARNING_RATE = 1e-3
+ADAM_BETAS = (0.9, 0.99)
+ADAM_EPS = 1e-8
+
+SCALAR_LOG_EVERY = 50
+DIAGNOSTIC_EVERY = 250
+SAMPLE_EVERY = 1_000
+DIAGNOSTIC_BATCH_SIZE = 64
+FIXED_SAMPLE_COUNT = 16
+SAMPLE_UPSCALE = 6
+
+P_MEAN = -0.4
+P_STD = 1.0
+DATA_PROPORTION = 0.75
+NORM_P = 1.0
+NORM_EPS = 1.0
+
+ROOT_DIR = "/content/meanflow_mnist_dit_sanity"
+RUN_NAME = "mnist_dit20k_" + time.strftime("%Y%m%d_%H%M%S")
+RUN_DIR = os.path.join(ROOT_DIR, RUN_NAME)
+SAMPLE_DIR = os.path.join(RUN_DIR, "samples")
+TENSORBOARD_ROOT = os.path.join(ROOT_DIR, "tensorboard")
+LOG_DIR = os.path.join(TENSORBOARD_ROOT, RUN_NAME)
+
+REFERENCE_PATH = os.path.join(RUN_DIR, "reference_mnist.png")
+CHECKPOINT_PATH = os.path.join(
+    RUN_DIR,
+    "meanflow_dit_mnist_20k.pt",
+)
+
+os.makedirs(SAMPLE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+writer = SummaryWriter(LOG_DIR)
+writer.add_text(
+    "run/config",
+    (
+        f"gpu={GPU_NAME}, steps={TRAIN_STEPS}, batch={BATCH_SIZE}, "
+        f"lr={LEARNING_RATE}, p_mean={P_MEAN}, p_std={P_STD}, "
+        f"data_proportion={DATA_PROPORTION}, norm_eps={NORM_EPS}"
+    ),
+    global_step=0,
+)
+writer.flush()
+
+print("RUN_DIR:", RUN_DIR)
+print("SAMPLE_DIR:", SAMPLE_DIR)
+print("TensorBoard log:", LOG_DIR)
+'''
+
+          tensorboard_markdown = '''## 1. TensorBoard — 학습 전에 실행
+
+메트릭은 PNG 그래프로 덮어쓰지 않고 **TensorBoard event log**에 누적한다.
+
+- `train/loss_adaptive`
+- `train/grad_norm`
+- `diagnostic/raw_mse_all`
+- `diagnostic/raw_mse_interval`
+- `diagnostic/interval_cosine`
+- `diagnostic/boundary_mse`
+- `run/elapsed_minutes`
+
+생성 이미지만 `samples/step_XXXXX.png`로 1000 step마다 **각각 별도 파일**로 저장한다.
+'''
+
+          tensorboard_code = '''# @title 1-1. Launch TensorBoard before training
+%load_ext tensorboard
+%tensorboard --logdir /content/meanflow_mnist_dit_sanity/tensorboard --reload_interval 5
+'''
+
+          diagnostics_source = '''# @title 5-1. Fixed batch / diagnostics / separate sample writer
+fixed_generator = torch.Generator().manual_seed(
+    SEED + 100
+)
+
+fixed_noise = torch.randn(
+    FIXED_SAMPLE_COUNT,
+    1,
+    32,
+    32,
+    generator=fixed_generator,
+).to(DEVICE)
+
+diagnostic_images, _ = next(
+    iter(test_loader)
+)
+diagnostic_images = diagnostic_images[
+    :DIAGNOSTIC_BATCH_SIZE
+].to(
+    DEVICE,
+    non_blocking=True,
+)
+
+diagnostic_noise = torch.randn(
+    diagnostic_images.shape,
+    generator=fixed_generator,
+).to(DEVICE)
+
+diagnostic_normal_a = torch.randn(
+    DIAGNOSTIC_BATCH_SIZE,
+    generator=fixed_generator,
+)
+diagnostic_normal_b = torch.randn(
+    DIAGNOSTIC_BATCH_SIZE,
+    generator=fixed_generator,
+)
+
+diagnostic_time_a = torch.sigmoid(
+    diagnostic_normal_a * P_STD + P_MEAN
+).to(DEVICE)
+diagnostic_time_b = torch.sigmoid(
+    diagnostic_normal_b * P_STD + P_MEAN
+).to(DEVICE)
+
+diagnostic_t = torch.maximum(
+    diagnostic_time_a,
+    diagnostic_time_b,
+)
+diagnostic_r = torch.minimum(
+    diagnostic_time_a,
+    diagnostic_time_b,
+)
+
+diagnostic_boundary_count = int(
+    DIAGNOSTIC_BATCH_SIZE * DATA_PROPORTION
+)
+diagnostic_r = diagnostic_r.clone()
+diagnostic_r[:diagnostic_boundary_count] = diagnostic_t[
+    :diagnostic_boundary_count
+]
+interval_mask = diagnostic_r < diagnostic_t
+
+reference_images = (
+    diagnostic_images[:FIXED_SAMPLE_COUNT] + 1.0
+) / 2.0
+reference_images = F.interpolate(
+    reference_images,
+    scale_factor=SAMPLE_UPSCALE,
+    mode="nearest",
+)
+save_image(
+    reference_images,
+    REFERENCE_PATH,
+    nrow=4,
+    padding=8,
+)
+
+
+def fixed_diagnostics(current_model):
+    t_image = diagnostic_t[:, None, None, None]
+    z_t = (
+        (1.0 - t_image) * diagnostic_images
+        + t_image * diagnostic_noise
+    )
+    velocity = diagnostic_noise - diagnostic_images
+
+    prediction, target = meanflow_outputs(
+        current_model,
+        z_t,
+        velocity,
+        diagnostic_r,
+        diagnostic_t,
+    )
+
+    residual = prediction - target
+    per_sample_mse = residual.square().flatten(1).mean(dim=1)
+    cosine_per_sample = F.cosine_similarity(
+        prediction.flatten(1),
+        target.flatten(1),
+        dim=1,
+        eps=1e-8,
+    )
+
+    boundary_prediction = current_model(
+        z_t,
+        diagnostic_t,
+        torch.zeros_like(diagnostic_t),
+    )
+    boundary_mse = F.mse_loss(
+        boundary_prediction,
+        velocity,
+    )
+
+    return {
+        "raw_mse_all": per_sample_mse.mean().item(),
+        "raw_mse_interval": per_sample_mse[
+            interval_mask
+        ].mean().item(),
+        "interval_cosine": cosine_per_sample[
+            interval_mask
+        ].mean().item(),
+        "boundary_mse": boundary_mse.item(),
+    }
+
+
+@torch.no_grad()
+def generate_one_step(current_model):
+    was_training = current_model.training
+    current_model.eval()
+
+    ones = torch.ones(
+        FIXED_SAMPLE_COUNT,
+        device=DEVICE,
+    )
+    average_velocity = current_model(
+        fixed_noise,
+        ones,
+        ones,
+    )
+    generated = fixed_noise - average_velocity
+
+    if was_training:
+        current_model.train()
+
+    return generated
+
+
+@torch.no_grad()
+def save_sample_step(current_model, step):
+    generated = generate_one_step(current_model)
+    generated = (
+        generated.clamp(-1.0, 1.0) + 1.0
+    ) / 2.0
+    generated = F.interpolate(
+        generated,
+        scale_factor=SAMPLE_UPSCALE,
+        mode="nearest",
+    )
+
+    output_path = os.path.join(
+        SAMPLE_DIR,
+        f"step_{step:05d}.png",
+    )
+    save_image(
+        generated,
+        output_path,
+        nrow=4,
+        padding=8,
+    )
+    return output_path
+
+
+print(
+    "fixed finite-interval samples:",
+    interval_mask.sum().item(),
+)
+print("reference:", REFERENCE_PATH)
+'''
+
+          diagnostics_markdown = '''## 5. Fixed diagnostics and separate sample files
+
+고정된 test image/noise/time pair로 250 step마다 진단하고 **TensorBoard에 누적**한다.
+
+- `raw_mse_all`
+- `raw_mse_interval`: 실제 `r<t` sample만
+- `interval_cosine`
+- `boundary_mse`: `h=0`에서 instantaneous velocity와의 MSE
+- `grad_norm`
+
+생성 이미지는 1000 step마다 `samples/step_XXXXX.png`로 각각 독립 저장한다.
+'''
+
+          train_markdown = '''## 6. Train 20k
+
+linked MNIST Colab처럼 Adam + 20k step을 사용한다.
+
+- adaptive loss / grad norm은 TensorBoard에 50 step마다 기록
+- fixed diagnostics는 TensorBoard에 250 step마다 기록
+- 생성은 1000 step마다 **별도 PNG** 저장
+- 마지막 checkpoint 저장
+'''
+
+          train_source = '''# @title 6-1. Train 20,000 steps
+
+def infinite_loader(loader):
+    while True:
+        for batch in loader:
+            yield batch
+
+
+optimizer = torch.optim.Adam(
+    model.parameters(),
+    lr=LEARNING_RATE,
+    betas=ADAM_BETAS,
+    eps=ADAM_EPS,
+)
+training_iterator = infinite_loader(
+    train_loader
+)
+start_time = time.time()
+
+step_zero_path = save_sample_step(
+    model,
+    step=0,
+)
+step_zero_diagnostics = fixed_diagnostics(
+    model
+)
+
+for metric_name, metric_value in step_zero_diagnostics.items():
+    writer.add_scalar(
+        f"diagnostic/{metric_name}",
+        metric_value,
+        0,
+    )
+writer.add_scalar("train/grad_norm", 0.0, 0)
+writer.add_scalar("run/elapsed_minutes", 0.0, 0)
+writer.flush()
+
+print("step 0 sample:", step_zero_path)
+print("step 0 diagnostics:", step_zero_diagnostics)
+
+model.train()
+
+for step in range(1, TRAIN_STEPS + 1):
+    images, _ = next(training_iterator)
+    images = images.to(
+        DEVICE,
+        non_blocking=True,
+    )
+
+    optimizer.zero_grad(
+        set_to_none=True,
+    )
+    loss = meanflow_loss(
+        model,
+        images,
+    )
+    loss.backward()
+
+    grad_norm_squared = torch.zeros(
+        (),
+        device=DEVICE,
+    )
+    for parameter in model.parameters():
+        if parameter.grad is None:
+            continue
+        grad_norm_squared = (
+            grad_norm_squared
+            + parameter.grad.detach().square().sum()
+        )
+    grad_norm = grad_norm_squared.sqrt().item()
+
+    optimizer.step()
+
+    if step == 1 or step % SCALAR_LOG_EVERY == 0:
+        writer.add_scalar(
+            "train/loss_adaptive",
+            loss.item(),
+            step,
+        )
+        writer.add_scalar(
+            "train/grad_norm",
+            grad_norm,
+            step,
+        )
+
+    if step % DIAGNOSTIC_EVERY == 0:
+        diagnostics = fixed_diagnostics(
+            model
+        )
+        elapsed_minutes = (
+            time.time() - start_time
+        ) / 60.0
+
+        for metric_name, metric_value in diagnostics.items():
+            writer.add_scalar(
+                f"diagnostic/{metric_name}",
+                metric_value,
+                step,
+            )
+        writer.add_scalar(
+            "run/elapsed_minutes",
+            elapsed_minutes,
+            step,
+        )
+        writer.flush()
+
+        print(
+            f"step={step:5d} "
+            f"raw_interval={diagnostics['raw_mse_interval']:.4f} "
+            f"interval_cos={diagnostics['interval_cosine']:.4f} "
+            f"boundary={diagnostics['boundary_mse']:.4f} "
+            f"grad={grad_norm:.3f} "
+            f"minutes={elapsed_minutes:.1f}"
+        )
+
+    if step % SAMPLE_EVERY == 0:
+        sample_path = save_sample_step(
+            model,
+            step,
+        )
+        print("saved sample:", sample_path)
+        model.train()
+
+torch.save(
+    {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "step": TRAIN_STEPS,
+        "config": {
+            "batch_size": BATCH_SIZE,
+            "learning_rate": LEARNING_RATE,
+            "betas": ADAM_BETAS,
+            "norm_eps": NORM_EPS,
+            "p_mean": P_MEAN,
+            "p_std": P_STD,
+            "data_proportion": DATA_PROPORTION,
+        },
+    },
+    CHECKPOINT_PATH,
+)
+
+writer.flush()
+writer.close()
+
+print("training complete")
+print("checkpoint:", CHECKPOINT_PATH)
+'''
+
+          result_markdown = '''## 7. Result paths
+
+생성 결과는 **시점별 독립 PNG**이고, 메트릭은 TensorBoard event log에 있다.
+
+결과 확인:
+- `samples/step_00000.png`
+- `samples/step_01000.png`
+- ...
+- `samples/step_20000.png`
+- TensorBoard: `TENSORBOARD_ROOT`
+- checkpoint: `CHECKPOINT_PATH`
+'''
+
+          result_code = '''# @title 7-1. Print result paths
+sample_files = sorted(
+    file_name
+    for file_name in os.listdir(SAMPLE_DIR)
+    if file_name.endswith(".png")
+)
+
+print("sample files:")
+for file_name in sample_files:
+    print(" -", os.path.join(SAMPLE_DIR, file_name))
+
+print("TensorBoard root:", TENSORBOARD_ROOT)
+print("reference:", REFERENCE_PATH)
+print("checkpoint:", CHECKPOINT_PATH)
+'''
+
+          # Replace existing setup and relevant later cells.
+          for cell in notebook['cells']:
+              text = source_text(cell)
+              if '# @title 0-1. Install / imports / configuration' in text:
+                  cell['source'] = lines(setup_source)
+              elif '# @title 4-1. Fixed batch / diagnostics / file writers' in text:
+                  cell['source'] = lines(diagnostics_source)
+              elif '# @title 5-1. Train 20,000 steps' in text:
+                  cell['source'] = lines(train_source)
+              elif '# @title 6-1. Print saved files and final metrics' in text:
+                  cell['source'] = lines(result_code)
+              elif text.startswith('## 4. Fixed diagnostics'):
+                  cell['source'] = lines(diagnostics_markdown)
+              elif text.startswith('## 5. Train 20k'):
+                  cell['source'] = lines(train_markdown)
+              elif text.startswith('## 6. Result paths'):
+                  cell['source'] = lines(result_markdown)
+
+          # Renumber MNIST section after inserting TensorBoard section.
+          for cell in notebook['cells']:
+              text = source_text(cell)
+              if text.startswith('## 1. MNIST'):
+                  cell['source'] = lines(text.replace('## 1. MNIST', '## 2. MNIST', 1))
+              elif '# @title 1-1. Download MNIST' in text:
+                  cell['source'] = lines(text.replace('# @title 1-1.', '# @title 2-1.', 1))
+              elif text.startswith('## 2. DiT'):
+                  cell['source'] = lines(text.replace('## 2. DiT', '## 3. DiT', 1))
+              elif '# @title 2-1. ~3.8M MeanFlow DiT' in text:
+                  cell['source'] = lines(text.replace('# @title 2-1.', '# @title 3-1.', 1))
+              elif text.startswith('## 3. MeanFlow'):
+                  cell['source'] = lines(text.replace('## 3. MeanFlow', '## 4. MeanFlow', 1))
+              elif '# @title 3-1. MeanFlow' in text:
+                  cell['source'] = lines(text.replace('# @title 3-1.', '# @title 4-1.', 1))
+
+          # Insert TensorBoard cells immediately after setup if not already present.
+          notebook['cells'] = [
+              cell
+              for cell in notebook['cells']
+              if 'Launch TensorBoard before training' not in source_text(cell)
+              and not source_text(cell).startswith('## 1. TensorBoard')
+          ]
+
+          setup_index = next(
+              i for i, cell in enumerate(notebook['cells'])
+              if '# @title 0-1. Install / imports / configuration' in source_text(cell)
+          )
+          notebook['cells'][setup_index + 1:setup_index + 1] = [
+              {
+                  'cell_type': 'markdown',
+                  'metadata': {},
+                  'source': lines(tensorboard_markdown),
+              },
+              {
+                  'cell_type': 'code',
+                  'execution_count': None,
+                  'metadata': {},
+                  'outputs': [],
+                  'source': lines(tensorboard_code),
+              },
+          ]
+
+          # Update top overview so output description matches current behavior.
+          for cell in notebook['cells']:
+              text = source_text(cell)
+              if text.startswith('[![Open In Colab]'):
+                  text = text.replace(
+                      '수치 결과는 `metrics.csv`와 `training_summary.png`에 저장한다.',
+                      '수치 메트릭은 TensorBoard event log에 누적하고, 생성 이미지는 step별 PNG로 각각 저장한다.'
+                  )
+                  cell['source'] = lines(text)
+                  break
+
+          # Hard validation.
+          serialized = json.dumps(
+              notebook,
+              ensure_ascii=False,
+              indent=1,
+          ) + '\n'
+          json.loads(serialized)
+          path.write_text(serialized, encoding='utf-8')
+          print('updated:', path)
+          PY
+
+      - name: Commit notebook fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mean_flow_sanity_check.ipynb
+          git commit -m 'Restore TensorBoard and Colab GPU metadata'
+          git push origin HEAD:main
