@@ -1,0 +1,64 @@
+name: Fix notebook render
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Normalize notebook metadata
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('mean_flow_sanity_check.ipynb')
+          notebook = json.loads(path.read_text(encoding='utf-8'))
+          notebook['metadata'] = {
+              'colab': {
+                  'gpuType': 'T4',
+                  'provenance': [],
+              },
+              'kernelspec': {
+                  'display_name': 'Python 3',
+                  'language': 'python',
+                  'name': 'python3',
+              },
+              'language_info': {
+                  'name': 'python',
+                  'version': '3.x',
+              },
+          }
+          notebook['nbformat'] = 4
+          notebook['nbformat_minor'] = 5
+          path.write_text(
+              json.dumps(notebook, ensure_ascii=False, indent=1) + '\n',
+              encoding='utf-8',
+          )
+
+          # Hard validation: fail the workflow if the file is not valid JSON.
+          json.loads(path.read_text(encoding='utf-8'))
+          print('normalized:', path)
+          PY
+
+      - name: Commit normalized notebook
+        run: |
+          if git diff --quiet -- mean_flow_sanity_check.ipynb; then
+            echo 'Notebook already normalized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mean_flow_sanity_check.ipynb
+          git commit -m 'Normalize notebook metadata for GitHub rendering'
+          git push origin HEAD:main
