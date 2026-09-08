@@ -1,0 +1,40 @@
+name: Assemble flow_basic notebook
+
+on:
+  push:
+    paths:
+      - '.github/workflows/assemble_flow_basic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct and validate notebook
+        run: |
+          python - <<'PY'
+          import base64, zlib, json, ast, pathlib
+          parts = [pathlib.Path(f'.flow_parts/z{i}').read_text().strip() for i in range(4)]
+          raw = zlib.decompress(base64.b64decode(''.join(parts)))
+          nb = json.loads(raw)
+          assert nb['nbformat'] == 4
+          assert len(nb['cells']) == 61
+          for i, cell in enumerate(nb['cells']):
+              if cell.get('cell_type') == 'code':
+                  src = ''.join(cell.get('source', []))
+                  src = '\n'.join(x for x in src.splitlines() if not x.lstrip().startswith('!'))
+                  ast.parse(src)
+          pathlib.Path('flow_basic.ipynb').write_bytes(raw)
+          print('validated cells:', len(nb['cells']))
+          PY
+      - name: Commit notebook
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add flow_basic.ipynb
+          git commit -m 'Add flow_basic Colab notebook'
+          git push
