@@ -15,15 +15,32 @@ def set_text(cell, source):
     cell["source"] = source.rstrip() + "\n"
 
 
-def ensure_comment_before(source, needle, comment):
-    if needle not in source or comment in source:
-        return source, 0
-    return source.replace(needle, f"{comment}\n{needle}", 1), 1
-
-
-def ensure_blank_before_top_level(source):
+def insert_comment_before_line(source, needle, comment):
+    """Insert a comment before the first line containing needle, preserving indentation."""
     lines = source.splitlines()
+    clean_comment = comment.strip()
+
+    for index, line in enumerate(lines):
+        if needle not in line:
+            continue
+
+        indent = line[: len(line) - len(line.lstrip())]
+        rendered_comment = f"{indent}{clean_comment}"
+
+        if rendered_comment in lines:
+            return source, 0
+
+        lines.insert(index, rendered_comment)
+        return "\n".join(lines), 1
+
+    return source, 0
+
+
+def normalize_spacing(source):
+    """Use blank lines to separate top-level definitions and comment-delimited blocks."""
+    lines = [line.rstrip() for line in source.splitlines()]
     out = []
+
     for line in lines:
         stripped = line.strip()
         is_top_level_boundary = (
@@ -35,22 +52,13 @@ def ensure_blank_before_top_level(source):
                 or stripped.startswith("with ")
             )
         )
-        if is_top_level_boundary and out and out[-1].strip():
-            out.append("")
-        out.append(line.rstrip())
+        is_comment = stripped.startswith("#")
 
-    # Collapse 3+ blank lines to one blank line inside notebook code cells.
-    normalized = []
-    blank_count = 0
-    for line in out:
-        if not line.strip():
-            blank_count += 1
-            if blank_count <= 1:
-                normalized.append("")
-        else:
-            blank_count = 0
-            normalized.append(line)
-    return "\n".join(normalized)
+        if (is_top_level_boundary or is_comment) and out and out[-1].strip():
+            out.append("")
+        out.append(line)
+
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip() + "\n"
 
 
 SECTION_RULES = {
@@ -61,7 +69,7 @@ SECTION_RULES = {
         ("TRAIN_STEPS =", "# Training hyperparameters"),
     ],
     "0-2": [
-        ("try:\n    dataset = load_dataset", "# Load FashionMNIST, with an explicit fallback mirror"),
+        ("try:", "# Load FashionMNIST, with an explicit fallback mirror"),
         ("def collate_fashion_mnist", "# Convert images to [-1, 1] and pack class labels"),
         ("train_loader = DataLoader", "# Build training and test data loaders"),
         ("sample_images, sample_labels", "# Quick shape and value-range sanity check"),
@@ -100,13 +108,11 @@ SECTION_RULES = {
         ("stanczuk_rows = []", "# Accumulate class-wise spectra and intrinsic-dimension estimates"),
         ("for label in range(10):", "# Measure the low-noise score spectrum for every class"),
         ("stanczuk_table =", "# Summarize the intrinsic-dimension estimates"),
-        ("for label in range(10):", "# Plot the class-wise singular-value spectra"),
     ],
     "2.": [
         ("VENTURA_TIMES =", "# Experiment settings and orthogonal probe directions"),
         ("for t_value in VENTURA_TIMES:", "# Estimate score-Jacobian spectra across noise levels"),
         ("display(pd.DataFrame(ventura_gap_rows))", "# Summarize spectral-gap locations"),
-        ("for t_value in VENTURA_TIMES:", "# Plot normalized spectra across time"),
     ],
     "3.": [
         ("NIEDOBA", "# Experiment settings"),
@@ -138,11 +144,11 @@ SECTION_RULES = {
         ("def alphaflow_cosines_on_batch", "# Compute the two AlphaFlow gradient-cosine diagnostics on one batch"),
         ("analysis_loader_iterator = infinite_batches(train_loader)", "# Reuse the training distribution for snapshot diagnostics"),
         ("for snapshot_path in available_snapshot_paths:", "# Evaluate every available training snapshot"),
-        ("analysis_model = fresh_model()", "    # Restore one snapshot into a fresh analysis model"),
-        ("tfm_tc_values = []", "    # Collect per-batch cosine values before aggregating statistics"),
-        ("for _ in range(ALPHAFLOW_BATCHES_PER_SNAPSHOT):", "    # Average diagnostics over several independent mini-batches"),
-        ("for pair_name, values in [", "    # Record mean and tail percentiles for each cosine pair"),
-        ("del analysis_model", "    # Release the snapshot model before loading the next checkpoint"),
+        ("analysis_model = fresh_model()", "# Restore one snapshot into a fresh analysis model"),
+        ("tfm_tc_values = []", "# Collect per-batch cosine values before aggregating statistics"),
+        ("for _ in range(ALPHAFLOW_BATCHES_PER_SNAPSHOT):", "# Average diagnostics over several independent mini-batches"),
+        ("for pair_name, values in [", "# Record mean and tail percentiles for each cosine pair"),
+        ("del analysis_model", "# Release the snapshot model before loading the next checkpoint"),
         ("alphaflow_table =", "# Summarize snapshot-wise AlphaFlow diagnostics"),
     ],
 }
@@ -150,17 +156,10 @@ SECTION_RULES = {
 
 def section_key(markdown):
     title = markdown.lstrip()
-    if title.startswith("## 0-1"):
-        return "0-1"
-    if title.startswith("## 0-2"):
-        return "0-2"
-    if title.startswith("## 0-3"):
-        return "0-3"
-    if title.startswith("## 0-4"):
-        return "0-4"
-    if title.startswith("## 0-5"):
-        return "0-5"
-    if title.startswith("## 0-6") or title.startswith("### 0-7") or title.startswith("### 0-8"):
+    for number in range(1, 7):
+        if title.startswith(f"## 0-{number}"):
+            return f"0-{number}"
+    if title.startswith("### 0-7") or title.startswith("### 0-8"):
         return "0-6"
     for number in range(1, 8):
         if title.startswith(f"# {number}."):
@@ -168,32 +167,30 @@ def section_key(markdown):
     return None
 
 
-def add_generic_long_cell_comments(source):
-    """Add only high-level comments to long cells that still have no comments."""
+def add_generic_comment(source):
+    """Give long, still-uncommented cells one useful high-level signpost."""
     nonempty = [line for line in source.splitlines() if line.strip()]
-    if len(nonempty) < 18 or "#" in source:
+    if len(nonempty) < 18 or any(line.lstrip().startswith("#") for line in source.splitlines()):
         return source, 0
 
-    additions = 0
-    patterns = [
-        (r"(?m)^([A-Z][A-Z0-9_]+\s*=)", "# Experiment configuration\n\\1"),
-        (r"(?m)^(def\s+)", "# Helper functions\n\\1"),
-        (r"(?m)^(for\s+)", "# Main computation loop\n\\1"),
-        (r"(?m)^(display\(|plt\.figure)", "# Results and visualization\n\\1"),
+    candidates = [
+        ("def ", "# Helper functions"),
+        ("for ", "# Main computation loop"),
+        ("display(", "# Results and visualization"),
+        ("plt.figure", "# Results and visualization"),
     ]
-    for pattern, replacement in patterns:
-        new_source, count = re.subn(pattern, replacement, source, count=1)
-        if count:
-            source = new_source
-            additions += 1
-    return source, additions
+    for needle, comment in candidates:
+        source, added = insert_comment_before_line(source, needle, comment)
+        if added:
+            return source, 1
+    return source, 0
 
 
 notebook = json.loads(NOTEBOOK.read_text())
 current_section = None
-comments_added = 0
 code_cells = 0
 long_cells = 0
+comments_added = 0
 syntax_checked = 0
 
 for cell in notebook["cells"]:
@@ -211,33 +208,19 @@ for cell in notebook["cells"]:
     if len([line for line in source.splitlines() if line.strip()]) >= 18:
         long_cells += 1
 
-    # Keep shell/magic cells intact except trailing whitespace.
     if source.lstrip().startswith(("!", "%")):
         set_text(cell, source)
         continue
 
-    source = ensure_blank_before_top_level(source)
-
     for needle, comment in SECTION_RULES.get(current_section, []):
-        source, added = ensure_comment_before(source, needle, comment)
+        source, added = insert_comment_before_line(source, needle, comment)
         comments_added += added
 
-    source, added = add_generic_long_cell_comments(source)
+    source, added = add_generic_comment(source)
     comments_added += added
-
-    # Keep one blank line around comment-delimited logical blocks.
-    lines = source.splitlines()
-    spaced = []
-    for line in lines:
-        if line.lstrip().startswith("#") and spaced and spaced[-1].strip():
-            spaced.append("")
-        spaced.append(line)
-    source = "\n".join(spaced)
-    source = re.sub(r"\n{3,}", "\n\n", source).strip() + "\n"
-
+    source = normalize_spacing(source)
     set_text(cell, source)
 
-    # Syntax-check every normal Python code cell after the readability pass.
     try:
         ast.parse(source)
         syntax_checked += 1
