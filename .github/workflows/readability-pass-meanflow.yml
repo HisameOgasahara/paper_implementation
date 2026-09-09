@@ -31,3 +31,5 @@ jobs:
             git commit -m "Improve MeanFlow notebook readability"
             git push
           fi
+
+# One-off workflow; remove after the readability pass succeeds.
