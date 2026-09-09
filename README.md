@@ -6,7 +6,7 @@
 
 [Colab에서 열기](https://colab.research.google.com/github/HisameOgasahara/paper_implementation/blob/main/flow_basic.ipynb) 후 GPU 런타임에서 위에서부터 실행한다. 공통 DiT는 `meanflow_minimal`의 조건부 구조를 사용하며, 입력은 32×32로 padding한 FashionMNIST다. 생성 모델은 Muon+AdamW, 평가용 분류기는 Adam을 사용한다.
 
-`TRAIN_STEPS=20_000`을 유지하면서 `EARLY_STOP_AT`으로 모델별 중단 시점을 지정한다. MeanFlow는 기존 FashionMNIST 로그·이미지의 7,000 step이 기본값이다. 다른 방법은 검증된 중단 시점이 없어 기본값이 `None`이며, 상한까지 학습한다. 검증한 step을 지정하면 해당 업데이트와 체크포인트 저장을 마친 뒤 중단한다. 학습률은 상수이며 CM의 격자 curriculum은 20,000-step 기준을 유지한다.
+`TRAIN_STEPS=20_000`을 유지하면서 `EARLY_STOP_AT`으로 모델별 중단 시점을 지정한다. FM, RF1, RF2, CM, CTM, Shortcut, MeanFlow 모두 기본적으로 각각 5,000 step에서 업데이트와 체크포인트 저장을 마친 뒤 중단한다. RF1과 RF2는 각 단계에서 5,000 step씩 학습한다. 실습 시간 제한을 위한 기본값이며 수렴을 보장하는 임계값은 아니다. 학습률은 상수이며 CM의 격자 curriculum은 20,000-step 기준을 유지한다.
 
 각 모델 절의 결과 셀은 클래스별 생성 그림을 표시한다. 이어지는 직접 생성 셀에서 `requested_labels`, `requested_nfe`, `requested_seed`를 바꿔 원하는 클래스를 생성할 수 있다. RF 절의 직접 생성 셀은 2-RF를 사용한다.
 
