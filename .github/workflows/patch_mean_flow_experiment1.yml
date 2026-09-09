@@ -15,7 +15,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Patch notebook
-        run: python .github/patch_meanflow.py
+        run: |
+          sed -i '/        if ";" in stripped and not stripped.startswith("!"):$/,+3d' .github/patch_meanflow.py
+          python .github/patch_meanflow.py
 
       - name: Commit patched notebook
         run: |
