@@ -1,0 +1,41 @@
+name: Normalize mean_flow_experiment1
+
+on:
+  push:
+    paths:
+      - ".github/workflows/normalize-mean-flow-notebook.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  normalize-notebook:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Black
+        run: python -m pip install black==25.1.0
+
+      - name: Normalize notebook code cells
+        run: python .github/scripts/normalize_mean_flow_notebook.py
+
+      - name: Remove temporary normalizer files
+        run: |
+          rm .github/scripts/normalize_mean_flow_notebook.py
+          rm .github/workflows/normalize-mean-flow-notebook.yml
+
+      - name: Commit normalized notebook
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mean_flow_experiment1.ipynb .github
+          git commit -m "Normalize mean_flow_experiment1 coding style"
+          git push
