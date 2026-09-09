@@ -1,0 +1,517 @@
+import json
+from pathlib import Path
+
+
+NOTEBOOK_PATH = Path("mean_flow_experiment1.ipynb")
+WORKFLOW_PATH = Path(".github/workflows/patch_mean_flow_experiment1.yml")
+SCRIPT_PATH = Path(".github/patch_meanflow.py")
+
+
+with NOTEBOOK_PATH.open("r", encoding="utf-8") as file:
+    notebook = json.load(file)
+
+cells = notebook["cells"]
+
+
+def source_text(cell):
+    source = cell.get("source", "")
+    if isinstance(source, list):
+        return "".join(source)
+    return source
+
+
+# Runtime configuration: disable native MHA fast path for forward-mode AD.
+for cell in cells:
+    text = source_text(cell)
+    if "torch.backends.cuda.matmul.allow_tf32 = True" not in text:
+        continue
+
+    text = text.replace(
+        "torch.backends.cuda.matmul.allow_tf32 = True\n",
+        "torch.backends.cuda.matmul.allow_tf32 = True\n"
+        "# torch.func.jvp uses forward-mode AD. The native MultiheadAttention\n"
+        "# fast path does not support it, so use the regular differentiable path.\n"
+        "torch.backends.mha.set_fastpath_enabled(False)\n",
+    )
+
+    text = text.replace(
+        "LABEL_DROPOUT = 0.10\n",
+        "LABEL_DROPOUT = 0.10\n\n"
+        "# Early stopping keeps 20k as a safety cap but avoids unnecessary training.\n"
+        "EARLY_STOP_MIN_STEPS = 5_000\n"
+        "EARLY_STOP_CHECK_EVERY = 1_000\n"
+        "EARLY_STOP_PATIENCE = 2\n"
+        "EARLY_STOP_MIN_RELATIVE_IMPROVEMENT = 0.005\n"
+        "EARLY_STOP_VALIDATION_BATCHES = 8\n",
+    )
+    cell["source"] = text
+    break
+
+
+# Attention weights are unused; keep the readable regular path.
+for cell in cells:
+    text = source_text(cell)
+    if "class DiTBlock(nn.Module):" not in text:
+        continue
+
+    text = text.replace(
+        "attended, _ = self.attention(hidden, hidden, hidden, need_weights=True)",
+        "attended, _ = self.attention(\n"
+        "            hidden,\n"
+        "            hidden,\n"
+        "            hidden,\n"
+        "            need_weights=False,\n"
+        "        )",
+    )
+    cell["source"] = text
+    break
+
+
+# Correct the stale explanation about JVP compatibility.
+for cell in cells:
+    text = source_text(cell)
+    if "## 0-3. Conditional TinyDiT" not in text:
+        continue
+
+    text = text.replace(
+        "`forward_features`는 뒤의 representation 분석을 위해 유지한다. JVP 호환성을 위해 attention은 `need_weights=True` 경로를 사용한다.",
+        "`forward_features`는 뒤의 representation 분석을 위해 유지한다. JVP는 forward-mode AD를 사용하므로 setup에서 PyTorch native MHA fast path를 끄고, attention weight는 사용하지 않아 `need_weights=False`로 둔다.",
+    )
+    cell["source"] = text
+    break
+
+
+# Insert reusable MeanFlow conversion helpers before verification/analysis cells.
+helper_marker = "def instantaneous_velocity(model, z_t, t, labels=None):"
+helper_exists = any(helper_marker in source_text(cell) for cell in cells)
+
+if not helper_exists:
+    insert_index = None
+    for index, cell in enumerate(cells):
+        if "def meanflow_loss(model, clean_images, labels=None):" in source_text(cell):
+            insert_index = index + 1
+            break
+
+    if insert_index is None:
+        raise RuntimeError("Could not locate MeanFlow objective cell")
+
+    helper_markdown = {
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": (
+            "### MeanFlow diagonal helpers\n\n"
+            "뒤의 구현 검증과 분석 셀은 diagonal slice "
+            "\\(u_\\theta(z_t,t,t)\\)를 반복해서 사용한다. "
+            "velocity, denoiser, score 변환을 한 곳에 정의해 실행 순서에 따른 `NameError`를 막는다.\n"
+        ),
+    }
+
+    helper_code = {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": (
+            "def instantaneous_velocity(model, z_t, t, labels=None):\n"
+            "    \"\"\"Evaluate the MeanFlow diagonal slice u(z_t, t, t).\"\"\"\n"
+            "    return model(\n"
+            "        z_t,\n"
+            "        t,\n"
+            "        t,\n"
+            "        labels,\n"
+            "    )\n\n\n"
+            "def denoiser_from_meanflow(model, z_t, t, labels=None):\n"
+            "    \"\"\"Convert diagonal MeanFlow velocity into an x0 estimate.\"\"\"\n"
+            "    velocity = instantaneous_velocity(\n"
+            "        model,\n"
+            "        z_t,\n"
+            "        t,\n"
+            "        labels,\n"
+            "    )\n"
+            "    time_scale = t[:, None, None, None]\n"
+            "    return z_t - time_scale * velocity\n\n\n"
+            "def score_from_meanflow(model, z_t, t, labels=None, eps=1e-5):\n"
+            "    \"\"\"Convert diagonal velocity into the score for the linear path.\"\"\"\n"
+            "    velocity = instantaneous_velocity(\n"
+            "        model,\n"
+            "        z_t,\n"
+            "        t,\n"
+            "        labels,\n"
+            "    )\n"
+            "    safe_t = t.clamp_min(eps)\n"
+            "    numerator = z_t + (1.0 - safe_t)[:, None, None, None] * velocity\n"
+            "    return -numerator / safe_t[:, None, None, None]\n"
+        ),
+    }
+
+    cells[insert_index:insert_index] = [
+        helper_markdown,
+        helper_code,
+    ]
+
+
+# Rewrite training documentation so it matches the actual stopping rule.
+for cell in cells:
+    text = source_text(cell)
+    if "## 0-5. 학습 · EMA · training snapshots" not in text:
+        continue
+
+    cell["source"] = (
+        "## 0-5. 학습 · EMA · training snapshots + early stopping\n\n"
+        "`TRAIN_STEPS=20_000`은 최대 학습 상한으로만 둔다. FashionMNIST에서는 그 전에 충분히 수렴할 수 있으므로 "
+        "5,000 step 이후 1,000 step마다 EMA 모델의 고정 validation raw SSE를 확인한다. "
+        "adaptive-normalized training loss는 거의 1에 가까워질 수 있어 early stopping 기준으로 쓰지 않는다.\n\n"
+        "validation raw SSE가 0.5% 이상 개선되지 않는 검사가 2회 연속이면 학습을 종료하고, "
+        "가장 좋았던 EMA 가중치를 최종 모델로 복구한다. 따라서 현재 설정에서 earliest stop은 대략 7,000 step이고, "
+        "계속 개선되면 최대 20,000 step까지 간다.\n\n"
+        "AlphaFlow 실습은 training throughout의 gradient cosine을 보므로 `SNAPSHOT_EVERY`마다 "
+        "학습 중 raw model state를 계속 저장한다.\n"
+    )
+    break
+
+
+training_source = """# Maintain an exponential-moving-average model for evaluation
+
+class EMA:
+    def __init__(self, model, decay=EMA_DECAY):
+        self.decay = decay
+        self.shadow = copy.deepcopy(model).eval()
+        for parameter in self.shadow.parameters():
+            parameter.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        for shadow_parameter, model_parameter in zip(
+            self.shadow.parameters(),
+            model.parameters(),
+        ):
+            shadow_parameter.mul_(self.decay)
+            shadow_parameter.add_(
+                model_parameter,
+                alpha=1.0 - self.decay,
+            )
+
+
+# Cycle through the training loader indefinitely
+
+def infinite_batches(loader):
+    while True:
+        for batch in loader:
+            yield batch
+
+
+# Clone a state dict to CPU so the best EMA checkpoint can be restored later.
+
+def clone_state_dict_to_cpu(model):
+    return {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in model.state_dict().items()
+    }
+
+
+# Evaluate a deterministic validation raw SSE.
+# The adaptive-normalized loss is intentionally not used as an early-stop metric.
+
+def evaluate_validation_raw_sse(
+    model,
+    batch_count=EARLY_STOP_VALIDATION_BATCHES,
+    seed=SEED + 50_000,
+):
+    validation_iterator = iter(test_loader)
+    raw_sse_values = []
+    was_training = model.training
+    model.eval()
+
+    cuda_devices = []
+    if DEVICE == "cuda":
+        cuda_devices = [torch.cuda.current_device()]
+
+    with torch.random.fork_rng(devices=cuda_devices):
+        torch.manual_seed(seed)
+        if DEVICE == "cuda":
+            torch.cuda.manual_seed_all(seed)
+
+        with torch.enable_grad():
+            for _ in range(batch_count):
+                clean_images, labels = next(validation_iterator)
+                clean_images = clean_images.to(
+                    DEVICE,
+                    non_blocking=True,
+                )
+                labels = labels.to(
+                    DEVICE,
+                    non_blocking=True,
+                )
+                _, auxiliary = meanflow_loss(
+                    model,
+                    clean_images,
+                    labels,
+                )
+                raw_sse_values.append(
+                    float(auxiliary["raw_sse"])
+                )
+
+    model.train(was_training)
+    return float(np.mean(raw_sse_values))
+
+
+# Optimize the MeanFlow model, save snapshots, and stop when validation stalls.
+
+def train_meanflow(model):
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+    )
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=AMP,
+    )
+    ema = EMA(model)
+    batch_iterator = infinite_batches(train_loader)
+    logs = []
+    snapshot_paths = []
+    start_time = time.time()
+    model.train()
+
+    best_validation_raw_sse = math.inf
+    best_ema_state = None
+    checks_without_improvement = 0
+    stopped_early = False
+    final_step = 0
+
+    for step in range(1, TRAIN_STEPS + 1):
+        final_step = step
+        clean_images, labels = next(batch_iterator)
+        clean_images = clean_images.to(
+            DEVICE,
+            non_blocking=True,
+        )
+        labels = labels.to(
+            DEVICE,
+            non_blocking=True,
+        )
+        optimizer.zero_grad(set_to_none=True)
+
+        with torch.autocast(
+            device_type="cuda" if AMP else "cpu",
+            dtype=torch.float16,
+            enabled=AMP,
+        ):
+            loss, auxiliary = meanflow_loss(
+                model,
+                clean_images,
+                labels,
+            )
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            5.0,
+        ).item()
+        scaler.step(optimizer)
+        scaler.update()
+        ema.update(model)
+
+        should_log = step == 1 or step % 100 == 0
+        if should_log:
+            record = {
+                "step": step,
+                "loss": float(loss.detach()),
+                "grad_norm": gradient_norm,
+            }
+            for key, value in auxiliary.items():
+                record[key] = float(value)
+            logs.append(record)
+            print(record)
+
+        if step % SNAPSHOT_EVERY == 0:
+            snapshot_path = os.path.join(
+                CHECKPOINT_DIR,
+                f"meanflow_step_{step}.pt",
+            )
+            torch.save(
+                model.state_dict(),
+                snapshot_path,
+            )
+            snapshot_paths.append(snapshot_path)
+
+        should_check_early_stop = (
+            step >= EARLY_STOP_MIN_STEPS
+            and step % EARLY_STOP_CHECK_EVERY == 0
+        )
+        if not should_check_early_stop:
+            continue
+
+        validation_raw_sse = evaluate_validation_raw_sse(
+            ema.shadow
+        )
+        relative_threshold = (
+            best_validation_raw_sse
+            * (1.0 - EARLY_STOP_MIN_RELATIVE_IMPROVEMENT)
+        )
+        improved = (
+            best_validation_raw_sse == math.inf
+            or validation_raw_sse < relative_threshold
+        )
+
+        print(
+            {
+                "step": step,
+                "validation_raw_sse": validation_raw_sse,
+                "best_validation_raw_sse": best_validation_raw_sse,
+                "early_stop_bad_checks": checks_without_improvement,
+            }
+        )
+
+        if improved:
+            best_validation_raw_sse = validation_raw_sse
+            best_ema_state = clone_state_dict_to_cpu(
+                ema.shadow
+            )
+            checks_without_improvement = 0
+        else:
+            checks_without_improvement += 1
+
+        if checks_without_improvement >= EARLY_STOP_PATIENCE:
+            stopped_early = True
+            print(
+                f"Early stopping at step {step}: "
+                f"validation raw SSE did not improve enough for "
+                f"{EARLY_STOP_PATIENCE} checks."
+            )
+            break
+
+    if best_ema_state is not None:
+        ema.shadow.load_state_dict(best_ema_state)
+
+    final_path = os.path.join(
+        CHECKPOINT_DIR,
+        "meanflow_ema.pt",
+    )
+    torch.save(
+        ema.shadow.state_dict(),
+        final_path,
+    )
+
+    elapsed = time.time() - start_time
+    training_summary = {
+        "final_step": final_step,
+        "stopped_early": stopped_early,
+        "best_validation_raw_sse": best_validation_raw_sse,
+    }
+    return (
+        ema.shadow,
+        pd.DataFrame(logs),
+        snapshot_paths,
+        elapsed,
+        training_summary,
+    )
+"""
+
+
+for cell in cells:
+    text = source_text(cell)
+    if "class EMA:" in text and "def train_meanflow(model):" in text:
+        cell["source"] = training_source
+        break
+
+
+launch_source = """# Launch training and keep the best EMA model for analysis
+meanflow_model = fresh_model()
+(
+    meanflow_ema,
+    training_log,
+    snapshot_paths,
+    training_seconds,
+    training_summary,
+) = train_meanflow(meanflow_model)
+
+print("training seconds:", round(training_seconds, 1))
+print("training summary:", training_summary)
+print("snapshots:", snapshot_paths)
+"""
+
+
+for cell in cells:
+    text = source_text(cell)
+    if "# Launch training and keep the EMA model for analysis" in text:
+        cell["source"] = launch_source
+        break
+
+
+# Remove a duplicated verification heading left by an earlier edit.
+for cell in cells:
+    text = source_text(cell)
+    duplicated_heading = (
+        "## 0-6. MeanFlow 구현 검증\n\n"
+        "## 0-6. MeanFlow 구현 검증 + 1-step sample"
+    )
+    if duplicated_heading not in text:
+        continue
+
+    cell["source"] = text.replace(
+        duplicated_heading,
+        "## 0-6. MeanFlow 구현 검증",
+    )
+    break
+
+
+# Clear stale outputs and execution counters.
+for cell in cells:
+    if cell.get("cell_type") != "code":
+        continue
+    cell["execution_count"] = None
+    cell["outputs"] = []
+
+
+# Reject obvious code compression patterns before committing.
+suspicious_patterns = []
+for cell_index, cell in enumerate(cells):
+    if cell.get("cell_type") != "code":
+        continue
+
+    for line_number, line in enumerate(
+        source_text(cell).splitlines(),
+        start=1,
+    ):
+        stripped = line.strip()
+
+        if ";" in stripped and not stripped.startswith("!"):
+            suspicious_patterns.append(
+                (cell_index, line_number, stripped)
+            )
+
+        control_prefixes = (
+            "if ",
+            "for ",
+            "while ",
+        )
+        if stripped.startswith(control_prefixes) and ":" in stripped:
+            after_colon = stripped.split(":", 1)[1].strip()
+            if after_colon:
+                suspicious_patterns.append(
+                    (cell_index, line_number, stripped)
+                )
+
+if suspicious_patterns:
+    raise RuntimeError(
+        "Readability check failed: "
+        + repr(suspicious_patterns[:10])
+    )
+
+
+with NOTEBOOK_PATH.open("w", encoding="utf-8") as file:
+    json.dump(
+        notebook,
+        file,
+        ensure_ascii=False,
+        indent=1,
+    )
+    file.write("\n")
+
+
+# Clean up one-shot helper files so only the notebook change remains.
+WORKFLOW_PATH.unlink()
+SCRIPT_PATH.unlink()
