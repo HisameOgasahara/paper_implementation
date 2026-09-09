@@ -1,0 +1,33 @@
+name: MeanFlow notebook readability pass
+
+on:
+  push:
+    paths:
+      - '.github/workflows/readability-pass-meanflow.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  readability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Improve notebook readability
+        run: python .github/scripts/readability_pass_meanflow.py
+      - name: Validate notebook JSON
+        run: python -m json.tool mean_flow_experiment1.ipynb > /dev/null
+      - name: Commit notebook
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mean_flow_experiment1.ipynb
+          if git diff --cached --quiet; then
+            echo "No notebook changes"
+          else
+            git commit -m "Improve MeanFlow notebook readability"
+            git push
+          fi
