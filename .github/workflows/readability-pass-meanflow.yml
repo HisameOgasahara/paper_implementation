@@ -18,6 +18,8 @@ jobs:
           python-version: '3.12'
       - name: Improve notebook readability
         run: python .github/scripts/readability_pass_meanflow.py
+      - name: Polish long logical blocks
+        run: python .github/scripts/polish_meanflow_readability.py
       - name: Validate notebook JSON
         run: python -m json.tool mean_flow_experiment1.ipynb > /dev/null
       - name: Commit notebook
@@ -28,8 +30,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No notebook changes"
           else
-            git commit -m "Improve MeanFlow notebook readability"
+            git commit -m "Polish MeanFlow notebook readability"
             git push
           fi
-
-# One-off workflow; remove after the readability pass succeeds.
